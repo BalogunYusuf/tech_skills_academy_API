@@ -1,11 +1,11 @@
-# TechLearn Academy Backend
+# TechSkills Academy Backend
 
-Complete Node.js/Express/MongoDB backend for the TechLearn Academy platform. This fills in
+Complete Node.js/Express/MongoDB backend for the TechSkills Academy platform. This fills in
 everything the original setup guide described but didn't fully provide: the `Course`,
 `Material`, `Assignment`, `Quiz`, and `Announcement` models, every controller, every route file,
 and a hardened `server.js`.
 
-## What was added beyond the original guide
+## What was added after taking the project
 
 - **Models**: `Course.js`, `Material.js`, `Assignment.js`, `Quiz.js`, `Announcement.js` (only `User.js` was fully written before)
 - **Controllers**: `userController.js`, `courseController.js`, `assignmentController.js`, `quizController.js`, `announcementController.js`, and a corrected `materialController.js`
