@@ -1,161 +1,101 @@
 const Quiz = require('../models/Quiz');
+const Course = require('../models/Course');
+const User = require('../models/User');
 const { logEvent } = require('../utils/audit');
-
-// Student-safe projection: never leak correct answers or other students' attempts
 const studentProjection = '-questions.correctAnswer -attempts';
 
-// @desc    Get quizzes (optionally filtered by course and/or type=quiz|exam)
-// @route   GET /api/quizzes?course=xxx&type=exam
-// @access  Private
 exports.getQuizzes = async (req, res) => {
   try {
-    const { course, type } = req.query;
     const query = {};
-    if (course) query.course = course;
-    if (type) query.type = type;
-    if (req.user.role === 'student') query.isPublished = true;
-
+    if (req.query.course) query.course = req.query.course;
+    if (req.query.type) query.type = req.query.type;
+    if (req.user.role === 'student') {
+      const user = await User.findById(req.user.id).select('enrolledCourses');
+      query.course = { $in: user.enrolledCourses || [] }; query.isPublished = true;
+    }
+    if (req.user.role === 'instructor') query.instructor = req.user.id;
     const projection = req.user.role === 'student' ? studentProjection : '';
-
-    const quizzes = await Quiz.find(query, projection)
-      .populate('course', 'title')
-      .populate('instructor', 'firstName lastName')
-      .sort('-createdAt');
-
-    res.status(200).json({ success: true, count: quizzes.length, data: quizzes });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const quizzes = await Quiz.find(query, projection).populate('course', 'title').populate('instructor', 'firstName lastName').sort('-createdAt');
+    res.json({ success: true, count: quizzes.length, data: quizzes });
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
-// @desc    Get single quiz
-// @route   GET /api/quizzes/:id
-// @access  Private
 exports.getQuiz = async (req, res) => {
   try {
     const projection = req.user.role === 'student' ? studentProjection : '';
-    const quiz = await Quiz.findById(req.params.id, projection)
-      .populate('course', 'title')
-      .populate('instructor', 'firstName lastName');
-
-    if (!quiz) {
-      return res.status(404).json({ success: false, message: 'Quiz not found' });
-    }
-    if (req.user.role === 'student' && quiz.isPublished === false) {
-      return res.status(404).json({ success: false, message: 'Quiz not found' });
-    }
-
-    res.status(200).json({ success: true, data: quiz });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const quiz = await Quiz.findById(req.params.id, projection).populate('course', 'title').populate('instructor', 'firstName lastName');
+    if (!quiz) return res.status(404).json({ success: false, message: 'Quiz not found' });
+    if (req.user.role === 'instructor' && String(quiz.instructor?._id || quiz.instructor) !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized' });
+    if (req.user.role === 'student' && !quiz.isPublished) return res.status(404).json({ success: false, message: 'Quiz not found' });
+    res.json({ success: true, data: quiz });
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
-// @desc    Create quiz/exam (questions included)
-// @route   POST /api/quizzes
-// @access  Private/Staff
+const courseAccess = async (req, courseId) => {
+  const course = await Course.findById(courseId);
+  if (!course) return { status: 404, message: 'Course not found' };
+  if (req.user.role !== 'admin' && String(course.instructor) !== req.user.id) return { status: 403, message: 'You are not assigned to this course' };
+  return { course };
+};
+
 exports.createQuiz = async (req, res) => {
   try {
-    const quiz = await Quiz.create({ ...req.body, instructor: req.user.id });
-    logEvent(req, 'assessment.created', { targetType: 'quiz', targetId: quiz._id, meta: { title: quiz.title, type: quiz.type } });
+    const check = await courseAccess(req, req.body.course);
+    if (check.message) return res.status(check.status).json({ success: false, message: check.message });
+    const quiz = await Quiz.create({ ...req.body, instructor: check.course.instructor });
+    await logEvent(req, 'quiz.created', { targetType: 'quiz', targetId: quiz._id, meta: { title: quiz.title, type: quiz.type } });
     res.status(201).json({ success: true, data: quiz });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
-// @desc    Update quiz/exam
-// @route   PUT /api/quizzes/:id
-// @access  Private/Staff
 exports.updateQuiz = async (req, res) => {
   try {
-    let quiz = await Quiz.findById(req.params.id);
-    if (!quiz) {
-      return res.status(404).json({ success: false, message: 'Quiz not found' });
+    const quiz = await Quiz.findById(req.params.id);
+    if (!quiz) return res.status(404).json({ success: false, message: 'Quiz not found' });
+    if (req.user.role !== 'admin' && String(quiz.instructor) !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to update this quiz' });
+    if (req.body.course) {
+      const check = await courseAccess(req, req.body.course);
+      if (check.message) return res.status(check.status).json({ success: false, message: check.message });
+      req.body.instructor = check.course.instructor;
     }
-    if (req.user.role !== 'admin' && quiz.instructor.toString() !== req.user.id) {
-      return res.status(403).json({ success: false, message: 'Not authorized to update this quiz' });
-    }
-
-    quiz = await Quiz.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
-    res.status(200).json({ success: true, data: quiz });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    const updated = await Quiz.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    await logEvent(req, 'quiz.updated', { targetType: 'quiz', targetId: updated._id, meta: { title: updated.title } });
+    res.json({ success: true, data: updated });
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
-// @desc    Delete quiz/exam
-// @route   DELETE /api/quizzes/:id
-// @access  Private/Staff
 exports.deleteQuiz = async (req, res) => {
   try {
     const quiz = await Quiz.findById(req.params.id);
-    if (!quiz) {
-      return res.status(404).json({ success: false, message: 'Quiz not found' });
-    }
-    if (req.user.role !== 'admin' && quiz.instructor.toString() !== req.user.id) {
-      return res.status(403).json({ success: false, message: 'Not authorized to delete this quiz' });
-    }
-
+    if (!quiz) return res.status(404).json({ success: false, message: 'Quiz not found' });
+    if (req.user.role !== 'admin' && String(quiz.instructor) !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized to delete this quiz' });
     await quiz.deleteOne();
-    logEvent(req, 'assessment.deleted', { targetType: 'quiz', targetId: req.params.id, meta: { title: quiz.title } });
-    res.status(200).json({ success: true, data: {} });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    await logEvent(req, 'quiz.deleted', { targetType: 'quiz', targetId: quiz._id, meta: { title: quiz.title } });
+    res.json({ success: true, data: {} });
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
-// @desc    Attempt a quiz - answers are scored server-side
-// @route   POST /api/quizzes/:id/attempt
-// @access  Private/Student
 exports.attemptQuiz = async (req, res) => {
   try {
-    const { answers } = req.body;
-    if (!Array.isArray(answers)) {
-      return res.status(400).json({ success: false, message: 'answers must be an array' });
-    }
-
+    if (!Array.isArray(req.body.answers)) return res.status(400).json({ success: false, message: 'answers must be an array' });
     const quiz = await Quiz.findById(req.params.id);
-    if (!quiz) {
-      return res.status(404).json({ success: false, message: 'Quiz not found' });
-    }
-    if (quiz.isPublished === false) {
-      return res.status(400).json({ success: false, message: 'This assessment is not available' });
-    }
-
-    let score = 0;
-    quiz.questions.forEach((q, i) => {
-      if (answers[i] === q.correctAnswer) {
-        score += q.points || 0;
-      }
-    });
-
-    quiz.attempts.push({ student: req.user.id, answers, score, submittedAt: new Date() });
-    await quiz.save();
-
-    res.status(200).json({ success: true, score, totalPoints: quiz.totalPoints });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    if (!quiz) return res.status(404).json({ success: false, message: 'Quiz not found' });
+    if (!quiz.isPublished) return res.status(400).json({ success: false, message: 'This assessment is not available' });
+    const course = await Course.findById(quiz.course).select('students');
+    if (!course || !course.students.some((id) => String(id) === req.user.id)) return res.status(403).json({ success: false, message: 'Enroll in this course first' });
+    let score = 0; quiz.questions.forEach((q, i) => { if (req.body.answers[i] === q.correctAnswer) score += q.points || 0; });
+    quiz.attempts.push({ student: req.user.id, answers: req.body.answers, score, submittedAt: new Date() }); await quiz.save();
+    await logEvent(req, 'quiz.attempted', { targetType: 'quiz', targetId: quiz._id, meta: { title: quiz.title, score } });
+    res.json({ success: true, score, totalPoints: quiz.totalPoints });
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };
 
-// @desc    Get quiz results (staff see all attempts, students see their own)
-// @route   GET /api/quizzes/:id/results
-// @access  Private
 exports.getResults = async (req, res) => {
   try {
     const quiz = await Quiz.findById(req.params.id).populate('attempts.student', 'firstName lastName email');
-    if (!quiz) {
-      return res.status(404).json({ success: false, message: 'Quiz not found' });
-    }
-
-    if (req.user.role === 'student') {
-      const ownAttempts = quiz.attempts.filter((a) => a.student._id.toString() === req.user.id);
-      return res.status(200).json({ success: true, data: ownAttempts });
-    }
-
-    res.status(200).json({ success: true, data: quiz.attempts });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+    if (!quiz) return res.status(404).json({ success: false, message: 'Quiz not found' });
+    if (req.user.role === 'student') return res.json({ success: true, data: quiz.attempts.filter((a) => String(a.student?._id || a.student) === req.user.id).map((a) => ({ score: a.score, submittedAt: a.submittedAt })) });
+    if (req.user.role === 'instructor' && String(quiz.instructor) !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized' });
+    res.json({ success: true, data: quiz.attempts });
+  } catch (error) { res.status(500).json({ success: false, message: error.message }); }
 };

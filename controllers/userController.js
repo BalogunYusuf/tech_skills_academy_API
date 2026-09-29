@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const { logEvent } = require('../utils/audit');
 
 // @desc    Get logged-in user's profile
 // @route   GET /api/users/profile
@@ -100,6 +101,8 @@ exports.createStaff = async (req, res) => {
       department,
       staffId: `STF${Date.now()}`
     });
+
+    await logEvent(req, 'user.staff_created', { targetType: 'user', targetId: user._id, meta: { email: user.email, role: user.role } });
 
     res.status(201).json({
       success: true,

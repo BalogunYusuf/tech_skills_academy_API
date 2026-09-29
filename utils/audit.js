@@ -15,7 +15,7 @@ const logEvent = (req, action, { targetType = null, targetId = null, meta = null
     ip: req.ip || req.headers['x-forwarded-for'] || null
   };
 
-  AuditLog.create(entry).catch((err) => console.error('Audit log failed:', err.message));
+  return AuditLog.create(entry).catch((err) => { console.error('Audit log failed:', err.message); return null; });
 };
 
 module.exports = { logEvent };

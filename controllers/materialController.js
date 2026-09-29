@@ -2,6 +2,7 @@ const { Readable } = require('stream');
 const Material = require('../models/Material');
 const Course = require('../models/Course');
 const cloudinary = require('../config/cloudinary');
+const { logEvent } = require('../utils/audit');
 
 const isCloudinary = (process.env.STORAGE_MODE || 'cloudinary').toLowerCase() === 'cloudinary';
 
@@ -45,6 +46,10 @@ exports.uploadMaterial = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Course not found' });
     }
 
+    if (req.user.role !== 'admin' && String(courseDoc.instructor) !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'You are not assigned to this course' });
+    }
+
     let fileUrl = externalUrl || '';
     let filePublicId;
     let fileSize = req.file ? req.file.size : 0;
@@ -82,6 +87,7 @@ exports.uploadMaterial = async (req, res) => {
     });
     await courseDoc.save();
 
+    await logEvent(req, 'material.created', { targetType: 'material', targetId: material._id, meta: { title: material.title, course } });
     res.status(201).json({ success: true, data: material });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -96,11 +102,16 @@ exports.getMaterials = async (req, res) => {
     const { course } = req.query;
     const query = { isPublished: true };
 
+    if (req.user.role === 'instructor') query.instructor = req.user.id;
+
     if (course) {
       query.course = course;
     }
 
     if (req.user.role === 'student') {
+      const User = require('../models/User');
+      const user = await User.findById(req.user.id).select('enrolledCourses');
+      query.course = query.course ? query.course : { $in: user.enrolledCourses || [] };
       query.$or = [
         { accessLevel: 'all' },
         { accessLevel: 'enrolled' },
@@ -160,6 +171,7 @@ exports.updateMaterial = async (req, res) => {
       runValidators: true
     });
 
+    await logEvent(req, 'material.updated', { targetType: 'material', targetId: updated._id, meta: { title: updated.title } });
     res.status(200).json({ success: true, data: updated });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -185,6 +197,7 @@ exports.deleteMaterial = async (req, res) => {
     }
 
     await material.deleteOne();
+    await logEvent(req, 'material.deleted', { targetType: 'material', targetId: material._id, meta: { title: material.title } });
     res.status(200).json({ success: true, data: {} });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -206,6 +219,7 @@ exports.trackDownload = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Material not found' });
     }
 
+    await logEvent(req, 'material.downloaded', { targetType: 'material', targetId: material._id, meta: { title: material.title } });
     res.status(200).json({ success: true, fileUrl: material.fileUrl, downloads: material.downloads });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
